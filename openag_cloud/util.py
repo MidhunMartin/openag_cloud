@@ -1,29 +1,35 @@
 import requests
+from urlparse import urljoin
 
-def log_in(db_url, username, password):
+class CouchSession(requests.Session):
     """
-    Logs in to the CouchDB instance given by `db_url` with the credentials
-    `username` and `password` and returns the cookie associated with the new
-    session.
+    `requests.Session` subclass for interfacing with a CouchDB instance. It
+    maintains state about the connection and provides convenience functions for
+    user authentication.
     """
-    res = requests.post(
-        "{}/_session".format(db_url),
-        data={"name": username, "password": password}
-    )
-    if not res.status_code == 200:
-        raise RuntimeError(
-            "Failed to login to CouchDB: " + res.content
+    def __init__(self, db_url):
+        self.db_url = db_url
+        super(CouchSession, self).__init__()
+
+    def request(self, method, url, **kwargs):
+        url = urljoin(self.db_url, url)
+        return super(CouchSession, self).request(method, url, **kwargs)
+
+    def log_in(self, username, password):
+        """
+        Logs in to the CouchDB instance with the credentials `username` and
+        `password`
+        """
+        res = self.post(
+            "_session", data={"name": username, "password": password}
         )
-    return res.headers["Set-Cookie"].split(';')[0]
+        if not res.status_code == 200:
+            raise RuntimeError("Failed to log in to CouchDB: " + res.content)
+        self.headers.update({
+            "Cookie": res.headers["Set-Cookie"].split(';')[0]
+        })
 
-def log_out(db_url, cookie):
-    """
-    Logs out of the session defined by the cookie `cookie` on the CouchDB
-    instance given by `db_url`
-    """
-    res = requests.delete("{}/_session".format(db_url))
-    if res.status_code != 200:
-        raise RuntimeError(
-            "Failed to log out of CouchDB: " + res.content
-        )
-
+    def log_out(self):
+        res = self.delete("_session")
+        if res.status_code != 200:
+            raise RuntimeError("Failed to log out of CouchDB: " + res.content)

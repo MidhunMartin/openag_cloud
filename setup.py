@@ -29,13 +29,13 @@ setup(
     install_requires=[
         "CouchDB>=1.0.1",
         "Flask>=0.11",
+        "Flask-WTF>=0.12",
         "gevent>=1.1.1",
         "requests>=2.10",
     ],
     entry_points={
         "console_scripts": [
-            "openag_cloud_init = openag_cloud.init:main",
-            "openag_cloud_api = openag_cloud.api:main"
+            "openag_cloud = openag_cloud:main"
         ]
     },
     package_data={"openag_cloud": ["couchdb.ini"]}

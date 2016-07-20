@@ -12,9 +12,7 @@ global_dbs = [
     DbName.FIRMWARE_MODULE_TYPE
 ]
 
-per_user_dbs = [
+per_farm_dbs = [
     DbName.ENVIRONMENT,
     DbName.ENVIRONMENTAL_DATA_POINT,
-    DbName.SOFTWARE_MODULE,
-    DbName.FIRMWARE_MODULE
 ]

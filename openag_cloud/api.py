@@ -1,125 +1,93 @@
 #!/usr/bin/env python
 import json
-import argparse
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, current_app
+from flask_wtf import Form
+from wtforms import StringField
+from wtforms.validators import Required
 from urllib import quote
 
-from db_names import per_user_dbs
+from .util import CouchSession
+from .db_names import per_farm_dbs
 
-API_VER = "0.0.1"
+API_VER = "v0.1"
 
-app = Flask(__name__)
+class FarmForm(Form):
+    name = StringField(validators=[Required()])
+    farm_name = StringField(validators=[Required()])
 
-admin_username = None
-admin_password = None
+def create_app(db_url, admin_username, admin_password, secret_key):
+    app = Flask(__name__)
 
-@app.route("/api/{v}/register_user".format(v=API_VER), methods=["POST"])
-def register_user():
-    if not "username" in request.values:
-        return jsonify({"error": "No username was supplied"}), 400
-    if not "password" in request.values:
-        return jsonify({"error": "No password was supplied"}), 400
-    username = request.values["username"]
-    password = request.values["password"]
-    user_id = "org.couchdb.user:{}".format(username)
-    res = requests.put(
-        "http://localhost:5984/_users/{}".format(user_id),
-        data=json.dumps({
-            "_id": user_id,
-            "name": username,
-            "password": password,
-            "roles": [],
-            "type": "user"
-        })
-    )
-    if res.status_code == 409:
-        return jsonify(
-            {"error": "A user with that username already exists"}
-        ), 409
-    if res.status_code == 200:
-        return res.content, 200
-    return res.content, res.status_code
+    app.config["SECRET_KEY"] = secret_key
 
-@app.route("/api/{v}/register_farm".format(v=API_VER), methods=["POST"])
-def register_farm():
-    # Validate and extract supplied parameters
-    if not "username" in request.values:
-        return jsonify({"error": "No username was supplied"}), 400
-    if not "password" in request.values:
-        return jsonify({"error": "No password was supplied"}), 400
-    if not "farm_name" in request.values:
-        return jsonify({"error": "No farm_name was supplied"}), 400
-    username = request.values["username"]
-    password = request.values["password"]
-    farm_name = request.values["farm_name"]
+    app.s = CouchSession(db_url)
+    app.s.log_in(admin_username, admin_password)
 
-    # Make sure the user exists and the credentials are correct
-    user_info = requests.get(
-        "http://{u}:{p}@localhost:5984/_users/org.couchdb.user:{u}".format(
-            u=username, p=password
-        )
-    ).json()
+    @app.route("/{v}/register_farm".format(v=API_VER), methods=["POST"])
+    def register_farm():
+        form = FarmForm(csrf_enabled=False)
+        if not form.validate_on_submit():
+            return json.dumps(form.errors), 400
+        if not "Cookie" in request.headers:
+            return jsonify({"error": "Anonymous users cannot register farms"}), 403
 
-    # Create and configure datbases to store the farm data
-    full_db_names = {
-        db_name: quote("{}/{}/{}".format(username, farm_name, db_name), "")
-        for db_name in per_user_dbs
-    }
-    for full_db_name in full_db_names.values():
-        # Create the database
-        res = requests.put(
-            "http://{u}:{p}@localhost:5984/{db_name}".format(
-                u=admin_username, p=admin_password, db_name=full_db_name
-            )
-        )
-        if not res.status_code in [201, 412]:
+        # Make sure the cookie is for the correct user
+        res = current_app.s.get(
+            "_session", headers={"Cookie": request.headers["Cookie"]}
+        ).json()
+        if res["userCtx"]["name"] is None:
+            return jsonify({"error": "Session expired"}), 400
+        if not res["userCtx"]["name"] == form.name.data:
             return jsonify({
-                "error": "Failed to create database {}".format(full_db_name)
-            })
-
-        # Write security docs for the databases
-        res = requests.put(
-            "http://{u}:{p}@localhost:5984/{db_name}/_security".format(
-                u=admin_username, p=admin_password, db_name=full_db_name
-            ), data=json.dumps({
-                "admins": {
-                    "names": [],
-                    "roles": []
-                },
-                "members": {
-                    "names": [username],
-                    "roles": []
-                }
-            })
-        )
-        # If this fails, delete the database and give up
-        if not res.status_code == 200:
-            res = requests.delete(
-                "http://{u}:{p}@localhost:5984/{db_name}".format(
-                    u=admin_username, p=admin_password, db_name=full_db_name
-                )
-            )
-            return jsonify({
-                "error": "Failed to set security information for the database"
+                "error": "Provided username does not match current user"
             }), 400
-    return jsonify(full_db_names)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="""
-Runs the server responsible for creating new users and creating database for
-them to replicate into.
-""")
-    parser.add_argument("admin_username")
-    parser.add_argument("admin_password")
-    args = parser.parse_args()
-    global username, password
-    admin_username = args.admin_username
-    admin_password = args.admin_password
-    from gevent.wsgi import WSGIServer
-    http_server = WSGIServer(("", 5000), app)
-    http_server.serve_forever()
+        # Create and configure datbases to store the farm data
+        full_db_names = {
+            db_name: "{}/{}/{}".format(
+                form.name.data, form.farm_name.data, db_name
+            ) for db_name in per_farm_dbs
+        }
+        for full_db_name in full_db_names.values():
+            # Create the database
+            res = current_app.s.put(quote(full_db_name, ""))
+            if not res.status_code in [201, 412]:
+                return jsonify({
+                    "error": "Failed to create database {}".format(full_db_name)
+                })
 
-if __name__ == '__main__':
-    main()
+            # Write security docs for the databases
+            res = current_app.s.put(
+                quote(full_db_name, "") + "/_security",
+                data=json.dumps({
+                    "admins": {
+                        "names": [],
+                        "roles": []
+                    },
+                    "members": {
+                        "names": [form.name.data],
+                        "roles": []
+                    }
+                })
+            )
+            # If this fails, delete the database and give up
+            if not res.status_code == 200:
+                res = current_app.s.delete(quote(full_db_name, ""))
+                return jsonify({
+                    "error": "Failed to set security information for the database"
+                }), 400
+
+        # Update the user object to reflect the new farm
+        user_url = quote("_users/org.couchdb.user:")+form.name.data
+        user_info = current_app.s.get(user_url).json()
+        if not "farms" in user_info:
+            user_info["farms"] = []
+        farms = set(user_info["farms"])
+        farms.add(form.farm_name.data)
+        user_info["farms"] = list(farms)
+        res = current_app.s.put(user_url, data=json.dumps(user_info))
+        if not res.status_code == 200:
+            return "Failed to update user info" + res.content, res.status_code
+        return jsonify(full_db_names)
+    return app
